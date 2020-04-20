@@ -3,7 +3,12 @@ set -x
 
 _es=search-cloud-perf-lqrf3jjtaqo7727m7ynd2xyt4y.us-west-2.es.amazonaws.com
 _es_port=80
+_es_baseline=search-cloud-perf-lqrf3jjtaqo7727m7ynd2xyt4y.us-west-2.es.amazonaws.com
+_es_baseline_port=80
+throughput_tolerance=5
+latency_tolerance=5
 _metadata_collection=true
+client_server_pairs=(1 2 4)
 
 if [[ ${ES_SERVER} ]]; then
   _es=${ES_SERVER}
@@ -13,8 +18,35 @@ if [[ ${ES_PORT} ]]; then
   _es_port=${ES_PORT}
 fi
 
+
+if [[ ${ES_SERVER_BASELINE} ]] && [[ ${ES_PORT_BASELINE} ]]; then
+  _es_baseline=${ES_SERVER_BASELINE}
+  _es_baseline_port=${ES_PORT_BASELINE}
+fi
+
+if [[ ${THROUGHPUT_TOLERANCE} ]]; then
+  throughput_tolerance=${THROUGHPUT_TOLERANCE}
+fi
+
+if [[ ${LATENCY_TOLERANCE} ]]; then
+  latency_tolerance=${LATENCY_TOLERANCE}
+fi
+
+
 if [[ ${METADATA_COLLECTION} ]]; then
   _metadata_collection=${METADATA_COLLECTION}
+fi
+
+if [[ ${CLIENT_SERVER_PAIRS} ]]; then
+  client_server_pairs=${CLIENT_SERVER_PAIRS}
+fi
+
+if [[ ${COMPARE} != "true" ]]; then
+  export COMPARE=false
+  unset ES_SERVER_BASELINE ES_PORT_BASELINE BASELINE_HOSTNET_UUID BASELINE_MULTUS_UUID \
+        BASELINE_POD_1P_UUID BASELINE_POD_2P_UUID BASELINE_POD_4P_UUID \
+        BASELINE_SVC_1P_UUID BASELINE_SVC_2P_UUID BASELINE_SVC_4P_UUID \
+        BASELINE_CLOUD_NAME
 fi
 
 if [ ! -z ${2} ]; then
@@ -32,6 +64,12 @@ oc get clusterversion
 if [ $? -ne 0 ]; then
   echo "Workload Failed for cloud $cloud_name, Unable to connect to the cluster"
   exit 1
+fi
+
+if [[ ${COMPARE} == "true" ]]; then
+  echo $BASELINE_CLOUD_NAME,$cloud_name > uuid.txt
+else
+  echo $cloud_name > uuid.txt
 fi
 
 echo "Starting test for cloud: $cloud_name"

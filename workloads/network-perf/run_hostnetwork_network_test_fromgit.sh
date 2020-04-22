@@ -23,7 +23,7 @@ spec:
     port: $_es_port
   clustername: $cloud_name
   test_user: ${cloud_name}-hostnetwork-ci
-  metadata_collection: ${_metadata_collection}
+  metadata_collection: false
   metadata_sa: backpack-view
   metadata_privileged: true
   workload:

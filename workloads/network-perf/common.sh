@@ -34,7 +34,7 @@ export_defaults() {
   _es_baseline=${ES_SERVER_BASELINE:-https://search-perfscale-dev-chmf5l4sh66lvxbnadi4bznl3a.us-west-2.es.amazonaws.com:443}
   export _metadata_collection=${METADATA_COLLECTION:=true}
   export _metadata_targeted=true
-  COMPARE=${COMPARE:=false}
+  export COMPARE=${COMPARE:=false}
   network_type=$(oc get network cluster  -o jsonpath='{.status.networkType}' | tr '[:upper:]' '[:lower:]')
   gold_sdn=${GOLD_SDN:=openshiftsdn}
   throughput_tolerance=${THROUGHPUT_TOLERANCE:=5}
@@ -124,6 +124,8 @@ export_defaults() {
 
 deploy_operator() {
   log "Starting test for cloud: $cloud_name"
+  log "Removing my-ripsaw namespace, if it already exists"
+  oc delete namespace my-ripsaw --ignore-not-found
   log "Deploying benchmark-operator"
   oc apply -f /tmp/benchmark-operator/resources/namespace.yaml
   oc apply -f /tmp/benchmark-operator/deploy
@@ -212,11 +214,12 @@ assign_uuid() {
   else
     echo ${compare_uperf_uuid} >> uuid.txt
   fi
+  
 }
 
 run_benchmark_comparison() {
   ../../utils/touchstone-compare/run_compare.sh uperf ${baseline_uperf_uuid} ${compare_uperf_uuid} ${pairs}
-  pairs_array=( "${pairs_array[@]}" "compare_output_${pairs}p.yaml" )
+  pairs_array=( "${pairs_array[@]}" "compare_output_${pairs}.yaml" )
 }
 
 generate_csv() {

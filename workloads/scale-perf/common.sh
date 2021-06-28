@@ -20,7 +20,7 @@ _poll_interval=${POLL_INTERVAL:=5}
 _post_sleep=${POST_SLEEP:=0}
 COMPARE=${COMPARE:=false}
 _timeout=${TIMEOUT:=240}
-_runs=${RUNS:=3}
+_runs=${RUNS:=1}
 _workload_node_role=${WORKLOAD_NODE_ROLE:=worker}
 
 if [[ -n $SCALE ]]; then
@@ -65,6 +65,9 @@ else
 fi
 
 echo "Starting test for cloud: $cloud_name"
+
+echo "Removing my-ripsaw namespace, if it already exists"
+oc delete namespace my-ripsaw --ignore-not-found
 
 rm -rf /tmp/benchmark-operator
 

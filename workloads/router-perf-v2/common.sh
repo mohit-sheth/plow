@@ -1,4 +1,5 @@
 ENGINE=${ENGINE:-podman}
+KUBE_BURNER_RELEASE_URL=${KUBE_BURNER_RELEASE_URL:-https://github.com/cloud-bulldozer/kube-burner/releases/download/v0.9.1/kube-burner-0.9.1-Linux-x86_64.tar.gz}
 INFRA_TEMPLATE=http-perf.yml.tmpl
 INFRA_CONFIG=http-perf.yml
 KUBE_BURNER_IMAGE=quay.io/cloud-bulldozer/kube-burner:latest
@@ -11,7 +12,8 @@ THROUGHPUT_TOLERANCE=${THROUGHPUT_TOLERANCE:-5}
 LATENCY_TOLERANCE=${LATENCY_TOLERANCE:-5}
 PREFIX=${PREFIX:-$(oc get clusterversion version -o jsonpath="{.status.desired.version}")}
 LARGE_SCALE_THRESHOLD=${LARGE_SCALE_THRESHOLD:-24}
-
+METADATA_COLLECTION=${METADATA_COLLECTION:-true}
+NUM_NODES=$(oc get node -l node-role.kubernetes.io/worker --no-headers | grep -cw Ready)
 
 export TLS_REUSE=${TLS_REUSE:-true}
 export UUID=$(uuidgen)
@@ -25,13 +27,23 @@ export NUMBER_OF_ROUTERS=${NUMBER_OF_ROUTERS:-2}
 export CERBERUS_URL=${CERBERUS_URL}
 export SERVICE_TYPE=${SERVICE_TYPE:-NodePort}
 
+if [[ ${COMPARE_WITH_GOLD} == "true" ]]; then
+  ES_GOLD=${ES_GOLD:-${ES_SERVER}}
+  PLATFORM=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.type}' | tr '[:upper:]' '[:lower:]')
+  GOLD_SDN=${GOLD_SDN:-openshiftsdn}
+  NUM_ROUTER=$(oc get pods -n openshift-ingress --no-headers | wc -l)
+  GOLD_INDEX=$(curl -X GET "${ES_GOLD}/openshift-gold-${PLATFORM}-results/_search" -H 'Content-Type: application/json' -d ' {"query": {"term": {"version": '\"${GOLD_OCP_VERSION}\"'}}}')
+  LARGE_SCALE_BASELINE_UUID=$(echo $GOLD_INDEX | jq -r '."hits".hits[0]."_source"."http-benchmark".'\"$GOLD_SDN\"'."num_router".'\"$NUM_ROUTER\"'."num_nodes".'\"25\"'."uuid"')
+  SMALL_SCALE_BASELINE_UUID=$(echo $GOLD_INDEX | jq -r '."hits".hits[0]."_source"."http-benchmark".'\"$GOLD_SDN\"'."num_router".'\"$NUM_ROUTER\"'."num_nodes".'\"3\"'."uuid"')
+fi
+
 log(){
   echo -e "\033[1m$(date "+%d-%m-%YT%H:%M:%S") ${@}\033[0m"
 }
 
 get_scenario(){
   # We consider a large scale scenario any cluster with more than the given threshold
-  if [[ $(oc get node -l node-role.kubernetes.io/worker --no-headers | grep -cw Ready) -ge ${LARGE_SCALE_THRESHOLD} ]]; then
+  if [[ ${NUM_NODES} -ge ${LARGE_SCALE_THRESHOLD} ]]; then
     log "Large scale scenario detected: #workers >= ${LARGE_SCALE_THRESHOLD}"
     export NUMBER_OF_ROUTES=${LARGE_SCALE_ROUTES:-500}
     CLIENTS=${LARGE_SCALE_CLIENTS:-"1 20 80"}
@@ -50,8 +62,21 @@ get_scenario(){
 
 deploy_infra(){
   log "Deploying benchmark infrastructure"
+  WORKLOAD_NODE_SELECTOR=$(echo ${NODE_SELECTOR} | tr -d {:} | tr -d " ") # Remove braces and spaces
+  if [[ $(oc get node --show-labels -l ${WORKLOAD_NODE_SELECTOR} --no-headers | grep ${WORKLOAD_NODE_SELECTOR} -c) -eq 0 ]]; then
+    log "No nodes with label ${WORKLOAD_NODE_SELECTOR} found, proceeding to label a worker node at random."
+    SELECTED_NODE=$(oc get nodes -l "node-role.kubernetes.io/worker=" -o custom-columns=:.metadata.name | tail -n1)
+    log "Selected ${SELECTED_NODE} to label as ${WORKLOAD_NODE_SELECTOR}"
+    oc label node ${SELECTED_NODE} ${WORKLOAD_NODE_SELECTOR}=""
+  fi
   envsubst < ${INFRA_TEMPLATE} > ${INFRA_CONFIG}
-  ${ENGINE} run --rm -v $(pwd)/templates:/templates:z -v ${KUBECONFIG}:/root/.kube/config:z -v $(pwd)/${INFRA_CONFIG}:/http-perf.yml:z ${KUBE_BURNER_IMAGE} init -c http-perf.yml --uuid=${UUID}
+  if [[ ${ENGINE} == "local" ]]; then
+    log "Downloading and extracting kube-burner binary"
+    curl -LsS ${KUBE_BURNER_RELEASE_URL} | tar xz
+    ./kube-burner init -c http-perf.yml --uuid=${UUID}
+  else
+    ${ENGINE} run --rm -v $(pwd)/templates:/templates:z -v ${KUBECONFIG}:/root/.kube/config:z -v $(pwd)/${INFRA_CONFIG}:/http-perf.yml:z ${KUBE_BURNER_IMAGE} init -c http-perf.yml --uuid=${UUID}
+  fi
   oc create configmap -n http-scale-client workload --from-file=workload.py
   log "Adding workload.py to the client pod"
   oc set volumes -n http-scale-client deploy/http-scale-client --type=configmap --mount-path=/workload --configmap-name=workload --add
@@ -73,6 +98,15 @@ tune_workload_node(){
   TUNED_SELECTOR=$(echo ${NODE_SELECTOR} | tr -d {:})
   log "${1} tuned profile for node labeled with ${TUNED_SELECTOR}"
   sed "s#TUNED_SELECTOR#${TUNED_SELECTOR}#g" tuned-profile.yml | oc ${1} -f -
+}
+
+collect_metadata(){
+  log "Collecting metadata for UUID: ${UUID}"
+  git clone https://github.com/cloud-bulldozer/metadata-collector.git --depth=1
+  pushd metadata-collector
+  ./run_backpack.sh -x -c true -s ${ES_SERVER} -u ${UUID}
+  popd
+  rm -rf metadata-collector
 }
 
 run_mb(){
@@ -113,7 +147,7 @@ gen_mb_config(){
     local port=443
   fi
   (echo "["
-  while read n r s p t w; do
+  while read host; do
     if [[ ${first} == "true" ]]; then
         echo "{"
         first=false
@@ -122,7 +156,7 @@ gen_mb_config(){
     fi
     echo '"scheme": "'${scheme}'",
       "tls-session-reuse": '${TLS_REUSE}',
-      "host": "'${n}'",
+      "host": "'${host}'",
       "port": '${port}',
       "method": "GET",
       "path": "'${URL_PATH}'",
@@ -149,7 +183,7 @@ gen_mb_mix_config(){
       local scheme=https
       local port=443
     fi
-    while read n r s p t w; do
+    while read host; do
       if [[ ${first} == "true" ]]; then
           echo "{"
           first=false
@@ -158,7 +192,7 @@ gen_mb_mix_config(){
       fi
       echo '"scheme": "'${scheme}'",
         "tls-session-reuse": '${TLS_REUSE}',
-        "host": "'${n}'",
+        "host": "'${host}'",
         "port": '${port}',
         "method": "GET",
         "path": "'${URL_PATH}'",
@@ -172,4 +206,17 @@ gen_mb_mix_config(){
     done <<< $(oc get route -n http-scale-${mix_termination} --no-headers | awk '{print $2}')
   done
   echo "]") | python -m json.tool > http-scale-mix.json
+}
+
+test_routes(){
+  log "Testing all routes before triggering the workload"
+  for termination in http edge passthrough reencrypt; do
+    local scheme="https://"
+    if [[ ${termination} == "http" ]]; then
+      local scheme="http://"
+    fi
+    while read host; do
+      curl --retry 3 --connect-timeout 5 -sSk ${scheme}${host}/${URL_PATH} -o /dev/null
+    done <<< $(oc get route -n http-scale-${termination} --no-headers | awk '{print $2}')
+  done
 }
